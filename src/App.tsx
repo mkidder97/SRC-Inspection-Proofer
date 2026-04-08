@@ -1,121 +1,153 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { lazy, Suspense } from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from '@/components/ui/sonner'
+import { AuthProvider, useAuth } from '@/contexts/AuthContext'
+import { Skeleton } from '@/components/ui/skeleton'
 
-function App() {
-  const [count, setCount] = useState(0)
+const Login = lazy(() => import('@/pages/Login'))
+const Upload = lazy(() => import('@/pages/Upload'))
+const Reports = lazy(() => import('@/pages/Reports'))
+const ReportReview = lazy(() => import('@/pages/ReportReview'))
+const Library = lazy(() => import('@/pages/admin/Library'))
+const NotFound = lazy(() => import('@/pages/NotFound'))
 
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: 1, staleTime: 30_000 },
+  },
+})
+
+function PageLoader() {
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+    <div className="p-6 space-y-4">
+      <Skeleton className="h-8 w-48" />
+      <Skeleton className="h-64 w-full" />
+    </div>
   )
 }
 
-export default App
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth()
+  if (loading) return <PageLoader />
+  if (!user) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+function RoleRedirect() {
+  const { role, loading } = useAuth()
+  if (loading) return <PageLoader />
+  if (role === 'admin') return <Navigate to="/admin/library" replace />
+  return <Navigate to="/reports" replace />
+}
+
+function AppLayout({ children }: { children: React.ReactNode }) {
+  const { profile, signOut } = useAuth()
+  return (
+    <div className="min-h-screen flex flex-col">
+      <header className="border-b bg-card px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h1 className="text-lg font-bold text-primary">SRC Report Proofer</h1>
+          <nav className="flex gap-1 ml-6">
+            <a
+              href="/upload"
+              className="px-3 py-1.5 text-sm rounded-md hover:bg-muted transition-colors"
+            >
+              Upload
+            </a>
+            <a
+              href="/reports"
+              className="px-3 py-1.5 text-sm rounded-md hover:bg-muted transition-colors"
+            >
+              Reports
+            </a>
+            {profile?.role === 'admin' && (
+              <a
+                href="/admin/library"
+                className="px-3 py-1.5 text-sm rounded-md hover:bg-muted transition-colors"
+              >
+                Library
+              </a>
+            )}
+          </nav>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">{profile?.full_name || profile?.email}</span>
+          <button
+            onClick={signOut}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Sign out
+          </button>
+        </div>
+      </header>
+      <main className="flex-1">{children}</main>
+    </div>
+  )
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route
+                path="/"
+                element={
+                  <ProtectedRoute>
+                    <RoleRedirect />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/upload"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <Upload />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/reports"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <Reports />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/reports/:id"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <ReportReview />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/admin/library"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <Library />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Suspense>
+          <Toaster />
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
