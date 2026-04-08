@@ -8,6 +8,7 @@ const Login = lazy(() => import('@/pages/Login'))
 const Upload = lazy(() => import('@/pages/Upload'))
 const Reports = lazy(() => import('@/pages/Reports'))
 const ReportReview = lazy(() => import('@/pages/ReportReview'))
+const Library = lazy(() => import('@/pages/admin/Library'))
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
@@ -34,6 +35,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <nav className="flex gap-1">
             <a href="/upload" className="px-3 py-1.5 text-sm rounded-md hover:bg-gray-100">Upload</a>
             <a href="/reports" className="px-3 py-1.5 text-sm rounded-md hover:bg-gray-100">Reports</a>
+            <a href="/admin/library" className="px-3 py-1.5 text-sm rounded-md hover:bg-gray-100">Library</a>
           </nav>
         </div>
         <div className="flex items-center gap-3">
@@ -58,6 +60,7 @@ export default function App() {
               <Route path="/upload" element={<ProtectedRoute><AppLayout><Upload /></AppLayout></ProtectedRoute>} />
               <Route path="/reports" element={<ProtectedRoute><AppLayout><Reports /></AppLayout></ProtectedRoute>} />
               <Route path="/reports/:id" element={<ProtectedRoute><AppLayout><ReportReview /></AppLayout></ProtectedRoute>} />
+              <Route path="/admin/library" element={<ProtectedRoute><AppLayout><Library /></AppLayout></ProtectedRoute>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

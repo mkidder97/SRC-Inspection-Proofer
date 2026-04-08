@@ -113,10 +113,24 @@ Deno.serve(async (req: Request) => {
             description: "Type of inspection service performed",
           },
           roof_system_type: { type: ["string", "null"], description: "Type of roof system (e.g., TPO, EPDM, BUR)" },
-          square_footage: { type: ["number", "null"], description: "Approximate roof square footage" },
-          roof_age: { type: ["string", "null"], description: "Age of the roof if noted" },
+          system_description: { type: ["string", "null"], description: "Full roof system description (e.g., 'BUR with Gravel Surface')" },
+          square_footage: { type: ["number", "null"], description: "Roof area in square feet" },
+          roof_age: { type: ["number", "null"], description: "Roof age in years as a number" },
+          installed_year: { type: ["number", "null"], description: "Year the roof was installed (e.g. 2004)" },
+          roof_rating: { type: ["string", "null"], description: "Roof condition rating (e.g. Serviceable, Good, Needs Replacement)" },
+          replacement_year: { type: ["number", "null"], description: "Projected replacement year (e.g. 2027)" },
+          client_name: { type: ["string", "null"], description: "Client or owner name (e.g. Link Logistics, Prologis)" },
+          market: { type: ["string", "null"], description: "Market or city (e.g. Dallas, Houston)" },
+          capital_expense_total: { type: ["number", "null"], description: "Total capital expense budget in dollars" },
+          capital_expense_per_sqft: { type: ["number", "null"], description: "Capital expense per square foot" },
+          capital_expense_type: { type: ["string", "null"], description: "Capital expense description (e.g. Roof Replacement (Recover))" },
+          capital_expense_year: { type: ["number", "null"], description: "Year for capital expense (e.g. 2027)" },
+          maintenance_budget_total: { type: ["number", "null"], description: "Total maintenance/deficiency budget in dollars" },
+          maintenance_budget_per_sqft: { type: ["number", "null"], description: "Maintenance budget per square foot" },
           executive_summary: { type: ["string", "null"], description: "Full executive summary text" },
           scope_of_work: { type: ["string", "null"], description: "Scope of work narrative" },
+          work_order_history_summary: { type: ["string", "null"], description: "Full text of work order history section" },
+          inspection_findings: { type: ["string", "null"], description: "Full text of inspection findings paragraph" },
           sections_present: {
             type: "array",
             items: { type: "string" },
@@ -137,6 +151,23 @@ Deno.serve(async (req: Request) => {
             },
             description: "All line items with pricing",
           },
+          deficiencies: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                number: { type: "number", description: "Deficiency number (e.g. 1, 2, 3)" },
+                category: { type: "string", description: "Category (e.g. Roof Top Equipment, Skylights)" },
+                description: { type: "string", description: "Full description text" },
+                quantity: { type: "number", description: "Quantity from parenthetical notation like (3)" },
+                cost: { type: "number", description: "Dollar amount for this deficiency" },
+              },
+              required: ["number", "category", "description"],
+            },
+            description: "Structured deficiency items from deficiency schedule (page 3). Parse quantity from parenthetical notation like '(3)' as a number.",
+          },
+          deficiency_budget_total: { type: ["number", "null"], description: "Stated total deficiency/maintenance budget at bottom of deficiency page" },
+          deficiency_budget_per_sqft: { type: ["number", "null"], description: "Deficiency budget per square foot" },
           recommendations: {
             type: "array",
             items: {
@@ -154,7 +185,7 @@ Deno.serve(async (req: Request) => {
             description: "Overall confidence in extraction accuracy from 0.0 to 1.0",
           },
         },
-        required: ["sections_present", "line_items", "recommendations", "confidence"],
+        required: ["sections_present", "line_items", "deficiencies", "recommendations", "confidence"],
       },
     };
 
@@ -184,7 +215,7 @@ Deno.serve(async (req: Request) => {
               },
               {
                 type: "text",
-                text: "Extract all structured data from this commercial roofing inspection report PDF. Be thorough — capture every field, line item, recommendation, and section header. For line items, extract description, unit, quantity, unit_cost, and total_cost. If a field is not present in the document, return null for that field. Return your confidence as a number from 0.0 to 1.0.",
+                text: "Extract all structured data from this SRC commercial roofing inspection report PDF. Be thorough — capture every field, line item, deficiency, recommendation, and section header.\n\nKey instructions:\n- For line items, extract description, unit, quantity, unit_cost, and total_cost.\n- For deficiencies (typically on page 3), extract each as a structured object with number, category, description, quantity, and cost. Parse the quantity from parenthetical notation like '(3)' as a number.\n- Extract the client name, market/city, roof rating, installed year, replacement year, capital expense details, and maintenance budget.\n- Extract the full text of work_order_history_summary and inspection_findings paragraphs.\n- If a field is not present in the document, return null for that field.\n- Return your confidence as a number from 0.0 to 1.0.",
               },
             ],
           },

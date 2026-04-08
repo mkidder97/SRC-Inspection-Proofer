@@ -28,4 +28,9 @@ export const FLAG_TYPE_LABELS: Record<string, string> = {
   consistency: 'Consistency',
   prohibited_language: 'Prohibited Language',
   executive_summary: 'Executive Summary',
+  capital_expense: 'Capital Expense',
+  deficiency_pricing: 'Deficiency Pricing',
+  math_error: 'Math Error',
+  findings_consistency: 'Findings Consistency',
+  photo_validation: 'Photo Validation',
 }
