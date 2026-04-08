@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,7 +8,7 @@ const corsHeaders = {
 };
 
 // ============================================================
-// SRC CAPITAL REPLACEMENT PRICING SCHEDULE (fallback constants)
+// FALLBACK CONSTANTS — DB reference_library takes priority
 // ============================================================
 const REPLACEMENT_PRICING = {
   prologis_texas: {
@@ -43,10 +43,7 @@ const REPLACEMENT_PRICING = {
   },
 } as const;
 
-// ============================================================
-// SRC REPAIR / DEFICIENCY PRICING SCHEDULE (fallback constants)
-// ============================================================
-const REPAIR_PRICING: Record<string, { unit: string; price: number; notes: string }[]> = {
+const DEFAULT_REPAIR_PRICING: Record<string, { unit: string; price: number; notes: string }[]> = {
   tpo_single_ply: [
     { unit: "ea", price: 138, notes: "fill pitch pan" },
     { unit: "ea", price: 350, notes: "reflash scupper" },
@@ -106,6 +103,7 @@ const REPAIR_PRICING: Record<string, { unit: string; price: number; notes: strin
     { unit: "ea", price: 4500, notes: "replace 4x8 melt out" },
     { unit: "ea", price: 5500, notes: "replace 4x8 spring loaded" },
     { unit: "ea", price: 165, notes: "reseal skylight" },
+    { unit: "ea", price: 300, notes: "three course elastomeric coating" },
     { unit: "ea", price: 1000, notes: "new safety fall protection" },
     { unit: "ea", price: 800, notes: "new walk pads" },
   ],
@@ -121,9 +119,6 @@ const REPAIR_PRICING: Record<string, { unit: string; price: number; notes: strin
   ],
 };
 
-// ============================================================
-// DEFAULT PROHIBITED PHRASES
-// ============================================================
 const DEFAULT_PROHIBITED_PHRASES = [
   "structurally sound", "no structural concerns", "guaranteed", "warranted",
   "will not leak", "no further action required", "fully compliant",
@@ -140,7 +135,7 @@ interface ExtractedReport {
   roof_system_type?: string | null;
   system_description?: string | null;
   square_footage?: number | null;
-  roof_age?: number | null;
+  roof_age?: number | string | null;
   installed_year?: number | null;
   roof_rating?: string | null;
   replacement_year?: number | null;
@@ -164,8 +159,6 @@ interface ExtractedReport {
   deficiency_budget_total?: number | null;
   deficiency_budget_per_sqft?: number | null;
   sections_present?: string[];
-  line_items?: Array<Record<string, any>>;
-  recommendations?: Array<Record<string, any>>;
   [key: string]: any;
 }
 
@@ -179,24 +172,83 @@ interface ProofFlag {
   confidence?: number;
 }
 
+type RepairPricing = Record<string, { unit: string; price: number; notes: string }[]>;
+
+// ============================================================
+// DB Loaders — reference_library takes priority over constants
+// ============================================================
+async function loadRepairPricing(sb: SupabaseClient): Promise<RepairPricing> {
+  const { data: dbRows } = await sb
+    .from("reference_library")
+    .select("*")
+    .eq("entry_type", "repair_pricing")
+    .eq("is_active", true);
+
+  if (!dbRows?.length) return DEFAULT_REPAIR_PRICING;
+
+  const merged: RepairPricing = JSON.parse(JSON.stringify(DEFAULT_REPAIR_PRICING));
+  for (const row of dbRows) {
+    const category = row.service_type;
+    if (!category) continue;
+    if (!merged[category]) merged[category] = [];
+    const content = row.content as { unit: string; price: number } | null;
+    if (!content) continue;
+    const existingIdx = merged[category].findIndex(
+      (e) => e.notes.toLowerCase() === (row.label || "").toLowerCase()
+    );
+    if (existingIdx >= 0) {
+      merged[category][existingIdx] = { unit: content.unit, price: content.price, notes: row.label };
+    } else {
+      merged[category].push({ unit: content.unit, price: content.price, notes: row.label });
+    }
+  }
+  return merged;
+}
+
+async function loadProhibitedPhrases(sb: SupabaseClient): Promise<string[]> {
+  const { data: dbRows } = await sb
+    .from("reference_library")
+    .select("label")
+    .eq("entry_type", "prohibited_phrase")
+    .eq("is_active", true);
+
+  if (!dbRows?.length) return DEFAULT_PROHIBITED_PHRASES;
+  return dbRows.map((r: any) => (r.label || "").toLowerCase());
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+function parseNum(val: any): number | null {
+  if (val === null || val === undefined) return null;
+  if (typeof val === "number") return val;
+  if (typeof val === "string") {
+    const n = parseFloat(val);
+    return isNaN(n) ? null : n;
+  }
+  return null;
+}
+
 // ============================================================
 // Pass 1 — Capital Expense Budget Validation
 // ============================================================
 function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
   const flags: ProofFlag[] = [];
-  const roofArea = data.square_footage;
-  const capitalTotal = data.capital_expense_total;
+  const roofArea = parseNum(data.square_footage);
+  const capitalTotal = parseNum(data.capital_expense_total);
   if (!roofArea || !capitalTotal) return flags;
 
-  const isPrologis = /prologis/i.test(data.client_name ?? "");
-  const isTexas = /dallas|houston|austin|san antonio|fort worth|tx/i.test(data.market ?? "");
+  const clientName = data.client_name ?? "";
+  const market = data.market ?? "";
   const desc = data.system_description ?? data.roof_system_type ?? "";
   const capType = data.capital_expense_type ?? "";
 
+  const isPrologis = /prologis/i.test(clientName);
+  const isEastGroupHou = /eastgroup/i.test(clientName) && /houston|hou/i.test(market);
+  const isTexas = /dallas|houston|austin|san antonio|fort worth|tx/i.test(market);
   const isRecover = /recover/i.test(capType);
   const isTearoffTwo = /tear.?off.{0,10}two|tearoff.{0,10}2/i.test(capType);
   const isBURGravel = /bur.{0,10}gravel|gravel.{0,10}bur/i.test(desc);
-  const isTPO = /tpo/i.test(desc);
   const isEPDM = /epdm/i.test(desc);
   const isFullyAdhered = /fully.adhered/i.test(capType);
   const isLoadmasters = /loadmaster/i.test(capType);
@@ -204,7 +256,12 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
 
   let basePricePerSqft: number | null = null;
 
-  if (isPrologis && isTexas) {
+  // #9 — EastGroup Houston special pricing
+  if (isEastGroupHou) {
+    const eg = REPLACEMENT_PRICING.non_prologis_texas;
+    if (isRecover) basePricePerSqft = eg.eastgroup_hou_recover;
+    else if (isTearoffTwo) basePricePerSqft = eg.eastgroup_hou_tearoff;
+  } else if (isPrologis && isTexas) {
     const pt = REPLACEMENT_PRICING.prologis_texas;
     if (isRecover && isBURGravel) basePricePerSqft = pt.recover_bur_gravel;
     else if (isRecover) basePricePerSqft = pt.recover_tpo;
@@ -234,7 +291,7 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
 
   if (basePricePerSqft === null) {
     flags.push({
-      flag_type: "capital_expense", severity: "warning", pass: 1,
+      flag_type: "capital_expense", severity: "warning", pass: 1, confidence: 0.8,
       description: "Could not match capital expense type to a known pricing category. Manual review required.",
       expected: "Recognized replacement type (recover, tear-off, infill, EPDM swap)",
       found: capType || "unknown",
@@ -242,7 +299,23 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
     return flags;
   }
 
-  // Economies of scale adjustment
+  // #3 — Skylight replacement adder (only actual replacements, not reseals/coatings)
+  let skylightAdder = 0;
+  let skylightCount = 0;
+  if (data.deficiencies?.length) {
+    for (const def of data.deficiencies) {
+      if (/skylight/i.test(def.category)) {
+        const isReplacement = (def.cost && def.cost >= 500) ||
+          /replace|dome|melt.?out|spring.loaded/i.test(def.description);
+        if (isReplacement) {
+          skylightCount += def.quantity ?? 1;
+        }
+      }
+    }
+    skylightAdder = skylightCount * 1045;
+  }
+
+  // Economies of scale
   let economiesAdj = 0;
   if (roofArea < 100000) {
     economiesAdj = ((100000 - roofArea) / 25000) * 1.0;
@@ -252,19 +325,25 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
 
   const adjustedPriceLow = basePricePerSqft + economiesAdj - 0.25;
   const adjustedPriceHigh = basePricePerSqft + economiesAdj + 0.25;
-  const expectedTotalLow = Math.round(adjustedPriceLow * roofArea);
-  const expectedTotalHigh = Math.round(adjustedPriceHigh * roofArea);
+  const expectedTotalLow = Math.round(adjustedPriceLow * roofArea) + skylightAdder;
+  const expectedTotalHigh = Math.round(adjustedPriceHigh * roofArea) + skylightAdder;
 
-  const statedPerSqft = data.capital_expense_per_sqft ?? (capitalTotal / roofArea);
+  const statedPerSqft = parseNum(data.capital_expense_per_sqft) ?? (capitalTotal / roofArea);
   const midpoint = basePricePerSqft + economiesAdj;
   const percentOff = Math.abs(statedPerSqft - midpoint) / midpoint;
 
   if (percentOff > 0.10) {
+    const skylightNote = skylightAdder > 0
+      ? ` + $${skylightAdder.toLocaleString()} skylight replacement adder (${skylightCount} units)`
+      : "";
     flags.push({
       flag_type: "capital_expense",
       severity: percentOff > 0.20 ? "error" : "warning",
       pass: 1,
-      description: `Capital expense per sqft appears outside expected range for ${isPrologis ? "Prologis" : "non-Prologis"} ${isTexas ? "Texas" : "general"} market. Base: $${basePricePerSqft.toFixed(2)}/sqft, economies adj: +$${economiesAdj.toFixed(2)}/sqft (roof area: ${roofArea.toLocaleString()} sqft).`,
+      confidence: percentOff > 0.20 ? 0.95 : 0.85,
+      description: `Capital expense per sqft outside expected range for ${
+        isEastGroupHou ? "EastGroup Houston" : isPrologis ? "Prologis" : "non-Prologis"
+      } ${isTexas ? "Texas" : "general"} market. Base: $${basePricePerSqft.toFixed(2)}/sqft, economies adj: +$${economiesAdj.toFixed(2)}/sqft (roof: ${roofArea.toLocaleString()} sqft)${skylightNote}.`,
       expected: `$${adjustedPriceLow.toFixed(2)}–$${adjustedPriceHigh.toFixed(2)}/sqft (total ~$${expectedTotalLow.toLocaleString()}–$${expectedTotalHigh.toLocaleString()})`,
       found: `$${statedPerSqft.toFixed(2)}/sqft (total $${capitalTotal.toLocaleString()})`,
     });
@@ -276,7 +355,7 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
 // ============================================================
 // Pass 2 — Deficiency Pricing Validation
 // ============================================================
-function runPass2DeficiencyPricing(data: ExtractedReport): ProofFlag[] {
+function runPass2DeficiencyPricing(data: ExtractedReport, repairPricing: RepairPricing): ProofFlag[] {
   const flags: ProofFlag[] = [];
   const { deficiencies } = data;
   if (!deficiencies?.length) return flags;
@@ -291,20 +370,19 @@ function runPass2DeficiencyPricing(data: ExtractedReport): ProofFlag[] {
     const { number: defNum, category, description, quantity, cost } = def;
     if (!quantity || !cost) continue;
 
-    let pricingSections: typeof REPAIR_PRICING[string][] = [];
-    if (/skylight/i.test(category)) pricingSections = [REPAIR_PRICING.skylights];
-    else if (/gutter|downspout/i.test(category)) pricingSections = [REPAIR_PRICING.sheet_metal];
-    else if (/perimeter|coping|edge/i.test(category)) pricingSections = [REPAIR_PRICING.sheet_metal];
-    else if (/roof.top.equip|hvac|mechanical/i.test(category)) pricingSections = [REPAIR_PRICING.misc, REPAIR_PRICING.bur_gravel];
+    let pricingSections: typeof repairPricing[string][] = [];
+    if (/skylight/i.test(category)) pricingSections = [repairPricing.skylights || []];
+    else if (/gutter|downspout/i.test(category)) pricingSections = [repairPricing.sheet_metal || []];
+    else if (/perimeter|coping|edge/i.test(category)) pricingSections = [repairPricing.sheet_metal || []];
+    else if (/roof.top.equip|hvac|mechanical/i.test(category)) pricingSections = [repairPricing.misc || [], repairPricing.bur_gravel || []];
     else {
-      if (isBURGravel) pricingSections = [REPAIR_PRICING.bur_gravel, REPAIR_PRICING.misc];
-      else if (isTPO) pricingSections = [REPAIR_PRICING.tpo_single_ply, REPAIR_PRICING.misc];
-      else if (isEPDM) pricingSections = [REPAIR_PRICING.epdm, REPAIR_PRICING.misc];
-      else if (isCapSheet) pricingSections = [REPAIR_PRICING.bur_cap_sheet_modbit, REPAIR_PRICING.misc];
-      else pricingSections = [REPAIR_PRICING.misc];
+      if (isBURGravel) pricingSections = [repairPricing.bur_gravel || [], repairPricing.misc || []];
+      else if (isTPO) pricingSections = [repairPricing.tpo_single_ply || [], repairPricing.misc || []];
+      else if (isEPDM) pricingSections = [repairPricing.epdm || [], repairPricing.misc || []];
+      else if (isCapSheet) pricingSections = [repairPricing.bur_cap_sheet_modbit || [], repairPricing.misc || []];
+      else pricingSections = [repairPricing.misc || []];
     }
 
-    // Fuzzy match
     const descWords = (description || "").toLowerCase().split(/\W+/).filter((w: string) => w.length > 3);
     let bestMatch: { price: number; notes: string; unit: string } | null = null;
     let bestScore = 0;
@@ -331,6 +409,7 @@ function runPass2DeficiencyPricing(data: ExtractedReport): ProofFlag[] {
           flag_type: "deficiency_pricing",
           severity: percentOff > 0.40 ? "error" : "warning",
           pass: 2,
+          confidence: bestScore,
           description: `Deficiency ${defNum} (${category}): "${description}" — cost outside expected range. Best match: "${bestMatch.notes}" at $${bestMatch.price}/${bestMatch.unit}.`,
           expected: `~$${expectedCost.toLocaleString()} (${quantity} × $${bestMatch.price} × ${quantityFactor} factor)`,
           found: `$${cost.toLocaleString()}`,
@@ -339,88 +418,86 @@ function runPass2DeficiencyPricing(data: ExtractedReport): ProofFlag[] {
     }
   }
 
-  // Sum check
-  const deficiencySum = deficiencies.reduce((acc, d) => acc + (d.cost ?? 0), 0);
-  const statedTotal = data.deficiency_budget_total;
-  if (statedTotal && Math.abs(deficiencySum - statedTotal) > 1) {
-    flags.push({
-      flag_type: "deficiency_pricing", severity: "error", pass: 2,
-      description: "Sum of individual deficiency costs does not match stated total maintenance budget.",
-      expected: `$${deficiencySum.toLocaleString()} (sum of line items)`,
-      found: `$${statedTotal.toLocaleString()} (stated total)`,
-    });
-  }
+  // #8 — removed duplicate sum check (belongs in Pass 3 only)
 
   return flags;
 }
 
 // ============================================================
-// Pass 3 — Math Validation (deterministic, no AI)
+// Pass 3 — Math Validation (deterministic)
 // ============================================================
 function runPass3Math(data: ExtractedReport): ProofFlag[] {
   const flags: ProofFlag[] = [];
   const CURRENT_YEAR = new Date().getFullYear();
-  const roofArea = data.square_footage;
+  const roofArea = parseNum(data.square_footage);
 
   // Check 1: capital per_sqft × area ≈ total (±$500)
-  if (data.capital_expense_per_sqft && roofArea && data.capital_expense_total) {
-    const computed = data.capital_expense_per_sqft * roofArea;
-    if (Math.abs(computed - data.capital_expense_total) > 500) {
+  const capPerSqft = parseNum(data.capital_expense_per_sqft);
+  const capTotal = parseNum(data.capital_expense_total);
+  if (capPerSqft && roofArea && capTotal) {
+    const computed = capPerSqft * roofArea;
+    if (Math.abs(computed - capTotal) > 500) {
       flags.push({
-        flag_type: "math_error", severity: "error", pass: 3,
+        flag_type: "math_error", severity: "error", pass: 3, confidence: 1.0,
         description: "Capital expense per sqft × roof area does not equal capital expense total.",
-        expected: `$${Math.round(computed).toLocaleString()} (${data.capital_expense_per_sqft}/sqft × ${roofArea.toLocaleString()} sqft)`,
-        found: `$${data.capital_expense_total.toLocaleString()}`,
+        expected: `$${Math.round(computed).toLocaleString()} (${capPerSqft}/sqft × ${roofArea.toLocaleString()} sqft)`,
+        found: `$${capTotal.toLocaleString()}`,
       });
     }
   }
 
-  // Check 2: maintenance per_sqft × area ≈ total (±$100)
-  if (data.maintenance_budget_per_sqft && roofArea && data.maintenance_budget_total) {
-    const computed = data.maintenance_budget_per_sqft * roofArea;
-    if (Math.abs(computed - data.maintenance_budget_total) > 100) {
+  // Check 2: maintenance per_sqft × area ≈ total (±$500, warning — often a carryover)
+  const maintPerSqft = parseNum(data.maintenance_budget_per_sqft);
+  const maintTotal = parseNum(data.maintenance_budget_total);
+  if (maintPerSqft && roofArea && maintTotal) {
+    const computed = maintPerSqft * roofArea;
+    if (Math.abs(computed - maintTotal) > 500) {
       flags.push({
-        flag_type: "math_error", severity: "error", pass: 3,
-        description: "Maintenance budget per sqft × roof area does not equal maintenance budget total.",
+        flag_type: "math_error", severity: "warning", pass: 3, confidence: 1.0,
+        description: "Maintenance budget per sqft × roof area does not equal maintenance budget total. This may be a carried-forward figure from a prior year — verify manually.",
         expected: `$${Math.round(computed).toLocaleString()}`,
-        found: `$${data.maintenance_budget_total.toLocaleString()}`,
+        found: `$${maintTotal.toLocaleString()}`,
       });
     }
   }
 
-  // Check 3: Sum of deficiency line items = stated total
-  if (data.deficiencies?.length && data.deficiency_budget_total) {
+  // Check 3: Sum of deficiency costs = stated total
+  const defBudgetTotal = parseNum(data.deficiency_budget_total);
+  if (data.deficiencies?.length && defBudgetTotal) {
     const sum = data.deficiencies.reduce((acc, d) => acc + (d.cost ?? 0), 0);
-    if (Math.abs(sum - data.deficiency_budget_total) > 1) {
+    if (Math.abs(sum - defBudgetTotal) > 1) {
       flags.push({
-        flag_type: "math_error", severity: "error", pass: 3,
+        flag_type: "math_error", severity: "error", pass: 3, confidence: 1.0,
         description: "Sum of deficiency costs does not match stated total maintenance budget on page 3.",
         expected: `$${sum.toLocaleString()}`,
-        found: `$${data.deficiency_budget_total.toLocaleString()}`,
+        found: `$${defBudgetTotal.toLocaleString()}`,
       });
     }
   }
 
   // Check 4: roof_age = current_year - installed_year (±1)
-  if (data.roof_age && data.installed_year) {
-    const expectedAge = CURRENT_YEAR - data.installed_year;
-    if (Math.abs(data.roof_age - expectedAge) > 1) {
+  const roofAge = parseNum(data.roof_age);
+  const installedYear = parseNum(data.installed_year);
+  if (roofAge && installedYear) {
+    const expectedAge = CURRENT_YEAR - installedYear;
+    if (Math.abs(roofAge - expectedAge) > 1) {
       flags.push({
-        flag_type: "math_error", severity: "warning", pass: 3,
+        flag_type: "math_error", severity: "warning", pass: 3, confidence: 1.0,
         description: "Roof age does not match current year minus install year.",
-        expected: `${expectedAge} years (${CURRENT_YEAR} − ${data.installed_year})`,
-        found: `${data.roof_age} years`,
+        expected: `${expectedAge} years (${CURRENT_YEAR} − ${installedYear})`,
+        found: `${roofAge} years`,
       });
     }
   }
 
   // Check 5: replacement_year in the future
-  if (data.replacement_year && data.replacement_year < CURRENT_YEAR) {
+  const replYear = parseNum(data.replacement_year);
+  if (replYear && replYear < CURRENT_YEAR) {
     flags.push({
-      flag_type: "math_error", severity: "warning", pass: 3,
+      flag_type: "math_error", severity: "warning", pass: 3, confidence: 1.0,
       description: "Capital expense replacement year is in the past.",
       expected: `Year >= ${CURRENT_YEAR}`,
-      found: `${data.replacement_year}`,
+      found: `${replYear}`,
     });
   }
 
@@ -431,165 +508,116 @@ function runPass3Math(data: ExtractedReport): ProofFlag[] {
 // Pass 4 — Inspection Findings Consistency (AI - Haiku)
 // ============================================================
 async function runPass4FindingsConsistency(
-  data: ExtractedReport,
-  anthropicKey: string
+  data: ExtractedReport, anthropicKey: string
 ): Promise<ProofFlag[]> {
   if (!data.inspection_findings) return [];
 
   const prompt = `You are a QA proofer for SRC (Southern Roof Consultants) inspection reports.
-Your job is to identify factual inconsistencies between different sections of the same report.
-Be concise. Only flag genuine inconsistencies — do not flag things that are merely unspecified.
+Only flag genuine inconsistencies — do not flag things that are merely unspecified.
 
-## Structured Report Data
+## Structured Data
 \`\`\`json
 ${JSON.stringify({
-    roof_system: data.roof_system_type,
-    system_description: data.system_description,
-    roof_rating: data.roof_rating,
-    roof_age: data.roof_age,
-    installed_year: data.installed_year,
-    replacement_year: data.replacement_year,
-    capital_expense_type: data.capital_expense_type,
-    capital_expense_year: data.capital_expense_year,
+    roof_system: data.roof_system_type, system_description: data.system_description,
+    roof_rating: data.roof_rating, roof_age: data.roof_age,
+    installed_year: data.installed_year, replacement_year: data.replacement_year,
+    capital_expense_type: data.capital_expense_type, capital_expense_year: data.capital_expense_year,
     work_order_history_summary: data.work_order_history_summary,
     deficiency_count: data.deficiencies?.length,
     deficiency_categories: data.deficiencies?.map((d) => d.category),
   }, null, 2)}
 \`\`\`
 
-## Inspection Findings Narrative
+## Inspection Findings
 ${data.inspection_findings}
 
 ## Checks:
-1. Does the findings narrative mention the correct roof system? Flag mismatches with structured data.
-2. Is the capital expense type consistent with the roof system?
-3. Does the roof rating make sense given age, deficiency count, and replacement year?
-4. If work order history says "NO LEAKS REPORTED" but deficiencies include water-related repairs, flag it.
-5. Any other factual inconsistency between sections.
+1. Does findings mention correct roof system? Flag mismatches.
+2. Is capital expense type consistent with roof system?
+3. Does roof rating make sense given age, deficiencies, replacement year?
+4. If work orders say "NO LEAKS" but deficiencies include water-related repairs, flag it.
+5. Any other factual inconsistency.
 
-Return ONLY a JSON array of objects: [{"description": string, "expected": string, "found": string, "severity": "warning"|"error"}]
+Return ONLY a JSON array: [{"description": string, "expected": string, "found": string, "severity": "warning"|"error", "confidence": number}]
 Return [] if no issues.`;
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-3-5-haiku-20241022",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-      }),
+      headers: { "Content-Type": "application/json", "x-api-key": anthropicKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-3-5-haiku-20241022", max_tokens: 1024, messages: [{ role: "user", content: prompt }] }),
     });
-
     if (!resp.ok) return [];
     const result = await resp.json();
     const text = result.content?.find((b: any) => b.type === "text")?.text ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return [];
-
-    const parsed: Array<{ description: string; expected: string; found: string; severity: string }> = JSON.parse(jsonMatch[0]);
-    return parsed.map((f) => ({
-      flag_type: "findings_consistency" as const,
-      severity: (f.severity === "error" ? "error" : "warning") as "error" | "warning",
-      pass: 4,
-      description: f.description,
-      expected: f.expected,
-      found: f.found,
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.filter((f: any) => (f.confidence ?? 1.0) >= 0.7).map((f: any) => ({
+      flag_type: "findings_consistency", severity: f.severity === "error" ? "error" as const : "warning" as const,
+      pass: 4, description: f.description, expected: f.expected, found: f.found, confidence: f.confidence,
     }));
-  } catch (err) {
-    console.error("Pass 4 error:", err);
-    return [];
-  }
+  } catch (err) { console.error("Pass 4 error:", err); return []; }
 }
 
 // ============================================================
 // Pass 5 — Photo Validation (AI Vision)
 // ============================================================
 async function runPass5PhotoValidation(
-  data: ExtractedReport,
-  pdfBase64: string,
-  anthropicKey: string
+  data: ExtractedReport, pdfBase64: string, anthropicKey: string
 ): Promise<ProofFlag[]> {
   if (!pdfBase64) return [];
 
-  const deficiencyContext = data.deficiencies
-    ?.map((d) => `Deficiency ${d.number} (${d.category}): ${d.description}, quantity: ${d.quantity}`)
-    .join("\n") ?? "No deficiency data extracted.";
+  const defCtx = data.deficiencies?.map((d) =>
+    `Deficiency ${d.number} (${d.category}): ${d.description}, qty: ${d.quantity}`
+  ).join("\n") ?? "No deficiency data.";
 
   const prompt = `You are a QA proofer for SRC (Southern Roof Consultants) inspection reports.
-You are viewing the photo pages (pages 4–8) of an inspection report.
+Viewing photo pages (pages 4–8).
 
-## Expected deficiencies from report text:
-${deficiencyContext}
+## Expected deficiencies:
+${defCtx}
 
-## Roof system from Page 1:
-${data.system_description ?? data.roof_system_type ?? "unknown"}
+## Roof system: ${data.system_description ?? data.roof_system_type ?? "unknown"}
 
-## Photo validation checks:
-1. What roof system type is visible in the overview photos? Does it match "${data.system_description ?? data.roof_system_type}"?
-   - Gravel surface → BUR gravel ✓ | White membrane → TPO ✓ | Black membrane → EPDM ✓
-2. For each labeled deficiency photo, does it show the stated category?
-3. Do deficiency photo counts reasonably match quantities in the deficiency list?
-4. Are there obvious roof problems visible that are NOT mentioned in any deficiency? (flag at confidence 0.6–0.7 only)
+## Checks:
+1. Roof system visible in photos matches stated system? (Gravel→BUR, White membrane→TPO, Black→EPDM)
+2. Labeled deficiency photos match stated categories?
+3. Photo counts match deficiency quantities?
+4. Obvious problems visible but NOT in any deficiency? (confidence 0.6-0.7 only)
 
-Return ONLY a JSON array: [{"description": string, "expected": string, "found": string, "severity": "warning"|"error", "confidence": number}]
-Only include flags with confidence >= 0.6. Return [] if no issues.`;
+Return ONLY JSON array: [{"description": string, "expected": string, "found": string, "severity": "warning"|"error", "confidence": number}]
+Only flags with confidence >= 0.6. Return [] if no issues.`;
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "Content-Type": "application/json", "x-api-key": anthropicKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 2048,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } },
-            { type: "text", text: prompt },
-          ],
-        }],
+        model: "claude-sonnet-4-5", max_tokens: 2048,
+        messages: [{ role: "user", content: [
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } },
+          { type: "text", text: prompt },
+        ]}],
       }),
     });
-
     if (!resp.ok) return [];
     const result = await resp.json();
     const text = result.content?.find((b: any) => b.type === "text")?.text ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return [];
-
-    const parsed: Array<{ description: string; expected: string; found: string; severity: string; confidence: number }> =
-      JSON.parse(jsonMatch[0]);
-
-    return parsed
-      .filter((f) => (f.confidence ?? 1.0) >= 0.6)
-      .map((f) => ({
-        flag_type: "photo_validation" as const,
-        severity: (f.severity === "error" ? "error" : "warning") as "error" | "warning",
-        pass: 5,
-        description: f.description,
-        expected: f.expected,
-        found: f.found,
-        confidence: f.confidence,
-      }));
-  } catch (err) {
-    console.error("Pass 5 error:", err);
-    return [];
-  }
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.filter((f: any) => (f.confidence ?? 1.0) >= 0.6).map((f: any) => ({
+      flag_type: "photo_validation", severity: f.severity === "error" ? "error" as const : "warning" as const,
+      pass: 5, description: f.description, expected: f.expected, found: f.found, confidence: f.confidence,
+    }));
+  } catch (err) { console.error("Pass 5 error:", err); return []; }
 }
 
 // ============================================================
 // Pass 6 — Prohibited Language
 // ============================================================
-function runPass6ProhibitedLanguage(data: ExtractedReport): ProofFlag[] {
+function runPass6ProhibitedLanguage(data: ExtractedReport, phrases: string[]): ProofFlag[] {
   const flags: ProofFlag[] = [];
   const textFields = [
     { key: "executive_summary", label: "Executive Summary" },
@@ -602,21 +630,78 @@ function runPass6ProhibitedLanguage(data: ExtractedReport): ProofFlag[] {
     if (!text || typeof text !== "string") continue;
     const textLower = text.toLowerCase();
 
-    for (const phrase of DEFAULT_PROHIBITED_PHRASES) {
-      if (textLower.includes(phrase)) {
+    for (const phrase of phrases) {
+      if (textLower.includes(phrase.toLowerCase())) {
         flags.push({
-          flag_type: "prohibited_language",
-          severity: "error",
-          pass: 6,
-          description: `"${phrase}" found in ${field.label}. This is prohibited language per SRC guidelines.`,
-          expected: "No prohibited language",
-          found: phrase,
+          flag_type: "prohibited_language", severity: "error", pass: 6, confidence: 1.0,
+          description: `"${phrase}" found in ${field.label}. Prohibited per SRC guidelines.`,
+          expected: "No prohibited language", found: phrase,
         });
       }
     }
   }
-
   return flags;
+}
+
+// ============================================================
+// Pass 7 — Executive Summary Validation (AI - Haiku)
+// ============================================================
+async function runPass7ExecutiveSummary(
+  data: ExtractedReport, anthropicKey: string
+): Promise<ProofFlag[]> {
+  if (!data.executive_summary) return [];
+
+  const CURRENT_YEAR = new Date().getFullYear();
+  const replYear = parseNum(data.replacement_year);
+  const yearsUntilReplace = replYear ? replYear - CURRENT_YEAR : null;
+
+  const highDollarDefs = (data.deficiencies || [])
+    .filter((d) => (d.cost ?? 0) >= 500)
+    .map((d) => `${d.category}: ${d.description} ($${d.cost?.toLocaleString()})`)
+    .join("\n");
+
+  const prompt = `You are a QA proofer for SRC (Southern Roof Consultants) inspection reports.
+Review the executive summary against the structured report data.
+
+## Executive Summary
+${data.executive_summary}
+
+## Report Data
+Service type: ${data.service_type ?? "annual_pm"}
+Roof system: ${data.system_description ?? data.roof_system_type ?? "unknown"}
+Roof age: ${data.roof_age ?? "unknown"} years
+Roof rating: ${data.roof_rating ?? "unknown"}
+Replacement year: ${replYear ?? "unknown"} (${yearsUntilReplace !== null ? `${yearsUntilReplace} years from now` : "unknown"})
+
+## High-dollar deficiencies (>=$500) that should be mentioned:
+${highDollarDefs || "None over $500"}
+
+## Checks for annual inspection:
+1. If replacement is within 1-2 years (replacement year ${replYear}), the first paragraph MUST include replacement recommendation language like "Due to the age, current conditions, and leak history, SRC recommends replacing this assembly" or comparable tone. Flag if missing.
+2. High-dollar deficiency items (>=$500) should be referenced in the executive summary. Flag any that are completely absent.
+3. The executive summary should reference the correct roof system type.
+4. Should not contain subtle liability/guarantee language beyond what a prohibited-phrase check would catch.
+
+Return ONLY JSON array: [{"description": string, "expected": string, "found": string, "severity": "warning"|"error", "confidence": number}]
+Only flags with confidence >= 0.7. Return [] if no issues.`;
+
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": anthropicKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-3-5-haiku-20241022", max_tokens: 1024, messages: [{ role: "user", content: prompt }] }),
+    });
+    if (!resp.ok) return [];
+    const result = await resp.json();
+    const text = result.content?.find((b: any) => b.type === "text")?.text ?? "[]";
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.filter((f: any) => (f.confidence ?? 1.0) >= 0.7).map((f: any) => ({
+      flag_type: "executive_summary", severity: f.severity === "error" ? "error" as const : "warning" as const,
+      pass: 7, description: f.description, expected: f.expected, found: f.found, confidence: f.confidence,
+    }));
+  } catch (err) { console.error("Pass 7 error:", err); return []; }
 }
 
 // ============================================================
@@ -632,7 +717,6 @@ Deno.serve(async (req: Request) => {
   const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
 
   try {
-    // Auth
     const authHeader = req.headers.get("authorization");
     if (!authHeader) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -656,7 +740,6 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Fetch report
     const { data: report, error: fetchErr } = await sb
       .from("reports").select("*").eq("id", reportId).single();
     if (fetchErr || !report) {
@@ -673,37 +756,66 @@ Deno.serve(async (req: Request) => {
     }
 
     await sb.from("reports").update({ status: "proofing" }).eq("id", reportId);
-
     const extracted: ExtractedReport = report.extracted_data ?? {};
 
-    // Fetch PDF for Pass 5 (photo validation)
+    // #6 — Load reference_library data (DB takes priority over constants)
+    const [repairPricing, prohibitedPhrases] = await Promise.all([
+      loadRepairPricing(sb),
+      loadProhibitedPhrases(sb),
+    ]);
+
+    // Fetch PDF for Pass 5
     let pdfBase64: string | null = null;
     if (report.original_storage_path) {
-      const { data: fileData } = await sb.storage
-        .from("report-uploads")
-        .download(report.original_storage_path);
+      const { data: fileData } = await sb.storage.from("report-uploads").download(report.original_storage_path);
       if (fileData) {
         const buffer = await fileData.arrayBuffer();
         const uint8 = new Uint8Array(buffer);
         let binary = "";
-        for (let i = 0; i < uint8.length; i++) {
-          binary += String.fromCharCode(uint8[i]);
-        }
+        for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
         pdfBase64 = btoa(binary);
       }
     }
 
-    // Run all 6 passes
-    const allFlags: ProofFlag[] = [
-      ...runPass1CapitalExpense(extracted),
-      ...runPass2DeficiencyPricing(extracted),
-      ...runPass3Math(extracted),
-      ...(anthropicKey ? await runPass4FindingsConsistency(extracted, anthropicKey) : []),
-      ...(anthropicKey && pdfBase64 ? await runPass5PhotoValidation(extracted, pdfBase64, anthropicKey) : []),
-      ...runPass6ProhibitedLanguage(extracted),
-    ];
+    // #10 — Run all 7 passes with timing
+    const passTiming: Record<string, number> = {};
+    const allFlags: ProofFlag[] = [];
 
-    // Insert flags into DB
+    let t = Date.now();
+    allFlags.push(...runPass1CapitalExpense(extracted));
+    passTiming.pass1_capital_expense = Date.now() - t;
+
+    t = Date.now();
+    allFlags.push(...runPass2DeficiencyPricing(extracted, repairPricing));
+    passTiming.pass2_deficiency_pricing = Date.now() - t;
+
+    t = Date.now();
+    allFlags.push(...runPass3Math(extracted));
+    passTiming.pass3_math = Date.now() - t;
+
+    if (anthropicKey) {
+      t = Date.now();
+      allFlags.push(...await runPass4FindingsConsistency(extracted, anthropicKey));
+      passTiming.pass4_findings_consistency = Date.now() - t;
+
+      if (pdfBase64) {
+        t = Date.now();
+        allFlags.push(...await runPass5PhotoValidation(extracted, pdfBase64, anthropicKey));
+        passTiming.pass5_photo_validation = Date.now() - t;
+      }
+    }
+
+    t = Date.now();
+    allFlags.push(...runPass6ProhibitedLanguage(extracted, prohibitedPhrases));
+    passTiming.pass6_prohibited_language = Date.now() - t;
+
+    if (anthropicKey) {
+      t = Date.now();
+      allFlags.push(...await runPass7ExecutiveSummary(extracted, anthropicKey));
+      passTiming.pass7_executive_summary = Date.now() - t;
+    }
+
+    // Insert flags
     if (allFlags.length > 0) {
       const flagRows = allFlags.map((f) => ({
         report_id: reportId,
@@ -720,7 +832,7 @@ Deno.serve(async (req: Request) => {
 
       const { error: insertErr } = await sb.from("flags").insert(flagRows);
       if (insertErr) {
-        await sb.from("reports").update({ status: "failed", error_message: `Flag insert failed: ${insertErr.message}` }).eq("id", reportId);
+        await sb.from("reports").update({ status: "failed", error_message: `Flag insert: ${insertErr.message}` }).eq("id", reportId);
         return new Response(
           JSON.stringify({ error: "Failed to insert flags", details: insertErr.message }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -728,22 +840,18 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Update report
     await sb.from("reports").update({ status: "proofed", flag_count: allFlags.length }).eq("id", reportId);
 
-    // Audit log
     const flagsByType: Record<string, number> = {};
     for (const f of allFlags) flagsByType[f.flag_type] = (flagsByType[f.flag_type] || 0) + 1;
 
     await sb.from("audit_log").insert({
-      report_id: reportId,
-      user_id: user.id,
-      action: "proof",
-      details: { flag_count: allFlags.length, flags_by_type: flagsByType },
+      report_id: reportId, user_id: user.id, action: "proof",
+      details: { flag_count: allFlags.length, flags_by_type: flagsByType, pass_timing: passTiming },
     });
 
     return new Response(
-      JSON.stringify({ success: true, flagCount: allFlags.length, flagsByType }),
+      JSON.stringify({ success: true, flagCount: allFlags.length, flagsByType, passTiming }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (err) {
@@ -752,8 +860,7 @@ Deno.serve(async (req: Request) => {
       const body = await req.clone().json().catch(() => null);
       if (body?.reportId) {
         await sb.from("reports").update({
-          status: "failed",
-          error_message: err instanceof Error ? err.message : "Unknown proofing error",
+          status: "failed", error_message: err instanceof Error ? err.message : "Unknown proofing error",
         }).eq("id", body.reportId);
       }
     } catch { /* best effort */ }

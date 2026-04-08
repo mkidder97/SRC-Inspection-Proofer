@@ -91,6 +91,7 @@ export const REPAIR_PRICING: Record<string, { unit: string; price: number; notes
     { unit: "ea", price: 4500, notes: "replace 4x8 melt out" },
     { unit: "ea", price: 5500, notes: "replace 4x8 spring loaded" },
     { unit: "ea", price: 165, notes: "reseal skylight" },
+    { unit: "ea", price: 300, notes: "three course elastomeric coating" },
     { unit: "ea", price: 1000, notes: "new safety fall protection" },
     { unit: "ea", price: 800, notes: "new walk pads" },
   ],
