@@ -34,19 +34,14 @@ export function useReportFlags(reportId: string | undefined) {
   })
 
   const resolveFlag = useMutation({
-    mutationFn: async ({
-      flagId,
-      action,
-      finalValue,
-      note,
-    }: {
+    mutationFn: async (params: {
       flagId: string
       action: 'accept' | 'edit' | 'dismiss'
       finalValue?: string
       note?: string
     }) => {
       const { data, error } = await supabase.functions.invoke('resolve-flag', {
-        body: { flagId, action, finalValue, note },
+        body: params,
       })
       if (error) throw error
       return data
@@ -60,8 +55,7 @@ export function useReportFlags(reportId: string | undefined) {
     },
   })
 
-  const openFlags = flags?.filter((f) => f.status === 'open') || []
-  const resolvedFlags = flags?.filter((f) => f.status !== 'open') || []
+  const resolvedFlags = flags?.filter((f: any) => f.status !== 'open') || []
 
   return {
     flags,
@@ -69,8 +63,6 @@ export function useReportFlags(reportId: string | undefined) {
     flagsLoading,
     reportLoading,
     resolveFlag,
-    openFlags,
-    resolvedFlags,
     totalFlags: flags?.length || 0,
     resolvedCount: resolvedFlags.length,
   }
