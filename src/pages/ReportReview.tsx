@@ -27,69 +27,37 @@ export default function ReportReview() {
     resolvedCount,
   } = useReportFlags(id)
 
-  const approveReport = useMutation({
-    mutationFn: async () => {
-      const { error } = await supabase
-        .from('reports')
-        .update({ status: 'approved' })
-        .eq('id', id!)
-      if (error) throw error
-      // Audit log
-      const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
-        await supabase.from('audit_log').insert({
-          report_id: id,
-          user_id: user.id,
-          action: 'approve',
-          details: { total_flags: totalFlags, resolved: resolvedCount },
-        })
-      }
-      // Trigger AI learning from this approved report
-      await supabase.functions.invoke('learn-from-report', {
-        body: { reportId: id },
-      })
-    },
-    onSuccess: () => {
-      toast.success('Report approved')
-      queryClient.invalidateQueries({ queryKey: ['report', id] })
-    },
-    onError: (err) => {
-      toast.error(`Approval failed: ${err.message}`)
-    },
-  })
-
-  const generatePdf = useMutation({
+  const exportCorrections = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.functions.invoke(
-        'generate-corrected-report',
+        'export-corrections',
         { body: { reportId: id } }
       )
       if (error) throw error
       return data
     },
-    onSuccess: () => {
-      toast.success('Corrected PDF generated successfully')
+    onSuccess: (data) => {
+      // Build the text file and trigger download
+      const extracted = report?.extracted_data as Record<string, unknown> | null
+      const address = (extracted?.property_address as string) || 'report'
+      const date = (extracted?.inspection_date as string) || new Date().toISOString().split('T')[0]
+      const filename = `corrections-${address.replace(/[^a-zA-Z0-9]/g, '-')}-${date}.txt`
+
+      const blob = new Blob([formatCorrectionsText(data)], { type: 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+
+      toast.success('Corrections exported')
       queryClient.invalidateQueries({ queryKey: ['report', id] })
     },
     onError: (err) => {
-      toast.error(`PDF generation failed: ${err.message}`)
+      toast.error(`Export failed: ${err.message}`)
     },
   })
-
-  async function handleDownload() {
-    if (!report?.corrected_storage_path) return
-    const { data, error } = await supabase.storage
-      .from('corrected-reports')
-      .createSignedUrl(report.corrected_storage_path, 3600)
-    if (error || !data?.signedUrl) {
-      toast.error('Failed to get download URL')
-      return
-    }
-    const a = document.createElement('a')
-    a.href = data.signedUrl
-    a.download = `corrected-report-${id}.pdf`
-    a.click()
-  }
 
   function handleResolve(params: {
     flagId: string
@@ -144,11 +112,8 @@ export default function ReportReview() {
               report={report}
               totalFlags={totalFlags}
               resolvedCount={resolvedCount}
-              onGenerate={() => generatePdf.mutate()}
-              onDownload={handleDownload}
-              onApprove={() => approveReport.mutate()}
-              isGenerating={generatePdf.isPending}
-              isApproving={approveReport.isPending}
+              onExport={() => exportCorrections.mutate()}
+              isExporting={exportCorrections.isPending}
             />
             {flagsLoading ? (
               <div className="p-4 space-y-3">
@@ -172,4 +137,41 @@ export default function ReportReview() {
       </ResizablePanelGroup>
     </div>
   )
+}
+
+function formatCorrectionsText(data: any): string {
+  const m = data.metadata || {}
+  const lines: string[] = [
+    'SRC INSPECTION REPORT — CORRECTIONS SUMMARY',
+    '============================================',
+    `Property: ${m.property_address || 'N/A'} | Date: ${m.inspection_date || 'N/A'} | Type: ${m.service_type || 'N/A'} | Inspector: ${m.inspector_name || 'N/A'}`,
+    `Exported: ${m.exported_at || new Date().toISOString()}`,
+    '',
+    `Total flags: ${data.summary?.total ?? 0} | Accepted: ${data.summary?.accepted ?? 0} | Edited: ${data.summary?.edited ?? 0} | Dismissed: ${data.summary?.dismissed ?? 0}`,
+    '',
+  ]
+
+  const corrections = data.corrections || []
+  if (corrections.length > 0) {
+    lines.push(`CORRECTIONS APPLIED (${corrections.length})`)
+    corrections.forEach((c: any, i: number) => {
+      lines.push(`[${i + 1}] ${(c.flag_type || '').toUpperCase()} — ${c.field_label}`)
+      if (c.current_value) lines.push(`    Original: ${c.current_value}`)
+      if (c.resolution_value) lines.push(`    Corrected: ${c.resolution_value}`)
+      if (c.reason) lines.push(`    Reason: ${c.reason}`)
+      lines.push('')
+    })
+  }
+
+  const dismissed = data.dismissed || []
+  if (dismissed.length > 0) {
+    lines.push(`DISMISSED FLAGS (${dismissed.length})`)
+    dismissed.forEach((d: any, i: number) => {
+      lines.push(`[${i + 1}] ${(d.flag_type || '').toUpperCase()} — ${d.field_label}`)
+      if (d.dismiss_reason) lines.push(`    Dismissed: ${d.dismiss_reason}`)
+      lines.push('')
+    })
+  }
+
+  return lines.join('\n')
 }
