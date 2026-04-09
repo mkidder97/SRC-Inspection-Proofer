@@ -243,8 +243,10 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
   const desc = data.system_description ?? data.roof_system_type ?? "";
   const capType = data.capital_expense_type ?? "";
 
-  const isPrologis = /prologis/i.test(clientName);
-  const isEastGroupHou = /eastgroup/i.test(clientName) && /houston|hou/i.test(market);
+  // Use proofer-confirmed client type when available
+  const clientType = data._client_type as string | undefined;
+  const isPrologis = clientType === "prologis_tx" || (!clientType && /prologis/i.test(clientName));
+  const isEastGroupHou = clientType === "eastgroup_houston" || (!clientType && /eastgroup/i.test(clientName) && /houston|hou/i.test(market));
   const isTexas = /dallas|houston|austin|san antonio|fort worth|tx/i.test(market);
   const isRecover = /recover/i.test(capType);
   const isTearoffTwo = /tear.?off.{0,10}two|tearoff.{0,10}2/i.test(capType);
@@ -299,21 +301,20 @@ function runPass1CapitalExpense(data: ExtractedReport): ProofFlag[] {
     return flags;
   }
 
-  // #3 — Skylight replacement adder (only actual replacements, not reseals/coatings)
-  let skylightAdder = 0;
-  let skylightCount = 0;
-  if (data.deficiencies?.length) {
+  // Skylight replacement adder — use proofer-provided count, fall back to deficiency inference
+  let skylightCount = parseNum(data._skylight_count) ?? 0;
+  const skylightDomeType = data._skylight_dome_type as string | undefined;
+  if (skylightCount === 0 && data.deficiencies?.length) {
     for (const def of data.deficiencies) {
       if (/skylight/i.test(def.category)) {
         const isReplacement = (def.cost && def.cost >= 500) ||
           /replace|dome|melt.?out|spring.loaded/i.test(def.description);
-        if (isReplacement) {
-          skylightCount += def.quantity ?? 1;
-        }
+        if (isReplacement) skylightCount += def.quantity ?? 1;
       }
     }
-    skylightAdder = skylightCount * 1045;
   }
+  const skylightPrice = skylightDomeType === "4x8" ? 2035 : 1045;
+  const skylightAdder = skylightCount * skylightPrice;
 
   // Economies of scale
   let economiesAdj = 0;
@@ -748,36 +749,31 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    if (report.status !== "extracted") {
+    if (report.status !== "confirmed" && report.status !== "extracted") {
       return new Response(
-        JSON.stringify({ error: `Report status is '${report.status}', expected 'extracted'` }),
+        JSON.stringify({ error: `Report status is '${report.status}', expected 'confirmed'` }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
     await sb.from("reports").update({ status: "proofing" }).eq("id", reportId);
-    const extracted: ExtractedReport = report.extracted_data ?? {};
 
-    // #6 — Load reference_library data (DB takes priority over constants)
+    // Use corrected_data (proofer-confirmed) first, fall back to extracted_data
+    const extracted: ExtractedReport = report.corrected_data ?? report.extracted_data ?? {};
+
+    // Use proofer_context for client type and skylight data
+    const prooferCtx = report.proofer_context ?? {};
+    if (prooferCtx.client_type) extracted._client_type = prooferCtx.client_type;
+    if (prooferCtx.skylight_count !== undefined) extracted._skylight_count = prooferCtx.skylight_count;
+    if (prooferCtx.skylight_dome_type) extracted._skylight_dome_type = prooferCtx.skylight_dome_type;
+
+    // Load reference_library data (DB takes priority over constants)
     const [repairPricing, prohibitedPhrases] = await Promise.all([
       loadRepairPricing(sb),
       loadProhibitedPhrases(sb),
     ]);
 
-    // Fetch PDF for Pass 5
-    let pdfBase64: string | null = null;
-    if (report.original_storage_path) {
-      const { data: fileData } = await sb.storage.from("report-uploads").download(report.original_storage_path);
-      if (fileData) {
-        const buffer = await fileData.arrayBuffer();
-        const uint8 = new Uint8Array(buffer);
-        let binary = "";
-        for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
-        pdfBase64 = btoa(binary);
-      }
-    }
-
-    // #10 — Run all 7 passes with timing
+    // Run focused passes (no photo validation, no ES flagging)
     const passTiming: Record<string, number> = {};
     const allFlags: ProofFlag[] = [];
 
@@ -797,23 +793,11 @@ Deno.serve(async (req: Request) => {
       t = Date.now();
       allFlags.push(...await runPass4FindingsConsistency(extracted, anthropicKey));
       passTiming.pass4_findings_consistency = Date.now() - t;
-
-      if (pdfBase64) {
-        t = Date.now();
-        allFlags.push(...await runPass5PhotoValidation(extracted, pdfBase64, anthropicKey));
-        passTiming.pass5_photo_validation = Date.now() - t;
-      }
     }
 
     t = Date.now();
     allFlags.push(...runPass6ProhibitedLanguage(extracted, prohibitedPhrases));
     passTiming.pass6_prohibited_language = Date.now() - t;
-
-    if (anthropicKey) {
-      t = Date.now();
-      allFlags.push(...await runPass7ExecutiveSummary(extracted, anthropicKey));
-      passTiming.pass7_executive_summary = Date.now() - t;
-    }
 
     // Insert flags
     if (allFlags.length > 0) {

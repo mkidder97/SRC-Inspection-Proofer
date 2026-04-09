@@ -55,16 +55,11 @@ export default function Upload() {
 
       const { error: extractErr } = await supabase.functions.invoke('extract-report', { body: { reportId: report.id } })
       if (extractErr) throw extractErr
-      setProgress(75)
-      setStatusText('Proofing report...')
-
-      const { error: proofErr } = await supabase.functions.invoke('proof-report', { body: { reportId: report.id } })
-      if (proofErr) throw proofErr
       setProgress(100)
-      setStatusText('Complete!')
+      setStatusText('Extraction complete — review next')
 
-      toast.success('Report uploaded and proofed')
-      navigate(`/reports/${report.id}`)
+      toast.success('Report extracted — review data before proofing')
+      navigate(`/reports/${report.id}/review`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Upload failed')
       setStatusText(null)

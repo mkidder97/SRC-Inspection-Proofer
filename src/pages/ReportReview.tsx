@@ -104,17 +104,15 @@ export default function ReportReview() {
                 </div>
               </div>
             )}
-            {allResolved && !isCompleted && (
-              <button
-                onClick={() => exportCorrections.mutate()}
-                disabled={exportCorrections.isPending}
-                className="w-full py-2 rounded-md text-sm font-medium text-primary-foreground bg-primary hover:opacity-90 disabled:opacity-50"
-              >
-                {exportCorrections.isPending ? 'Exporting...' : 'Export Corrections Summary'}
-              </button>
-            )}
-            {isCompleted && <p className="text-sm text-green-600 text-center font-medium">✓ Corrections exported</p>}
-            {!allResolved && totalFlags > 0 && <p className="text-xs text-muted-foreground text-center">Resolve all flags to export corrections</p>}
+            <button
+              onClick={() => navigate(`/reports/${id}/summary`)}
+              className="w-full py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 transition-colors shadow-sm"
+            >
+              Continue to Summary Builder
+              {!allResolved && totalFlags > 0 && (
+                <span className="ml-1.5 text-blue-200 font-normal">({totalFlags - resolvedCount} flags unresolved)</span>
+              )}
+            </button>
           </div>
 
           {/* Flag list */}

@@ -13,6 +13,7 @@ export const STATUS_LABELS: Record<string, string> = {
   uploaded: 'Uploaded',
   extracting: 'Extracting',
   extracted: 'Extracted',
+  confirmed: 'Confirmed',
   proofing: 'Proofing',
   proofed: 'Proofed',
   reviewing: 'Reviewing',
@@ -27,10 +28,18 @@ export const FLAG_TYPE_LABELS: Record<string, string> = {
   completeness: 'Completeness',
   consistency: 'Consistency',
   prohibited_language: 'Prohibited Language',
-  executive_summary: 'Executive Summary',
   capital_expense: 'Capital Expense',
   deficiency_pricing: 'Deficiency Pricing',
   math_error: 'Math Error',
   findings_consistency: 'Findings Consistency',
-  photo_validation: 'Photo Validation',
+}
+
+export const CLIENT_TYPES = ['prologis_tx', 'non_prologis_tx', 'eastgroup_houston', 'non_prologis_general'] as const
+export type ClientType = typeof CLIENT_TYPES[number]
+
+export const CLIENT_TYPE_LABELS: Record<ClientType, string> = {
+  prologis_tx: 'Prologis Texas',
+  non_prologis_tx: 'Non-Prologis Texas',
+  eastgroup_houston: 'EastGroup Houston',
+  non_prologis_general: 'Non-Prologis (General)',
 }
