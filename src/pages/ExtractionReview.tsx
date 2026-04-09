@@ -55,6 +55,25 @@ export default function ExtractionReview() {
         setContext(prev => ({ ...prev, skylight_count: count, skylight_dome_type: prev.skylight_dome_type || '4x4' }))
       }
     }
+
+    // Smart defaults: auto-detect client type from extracted data
+    const clientName = (ext.client_name || '').toLowerCase()
+    const market = (ext.market || '').toLowerCase()
+    if (/prologis/.test(clientName)) {
+      setContext(prev => prev.client_type ? prev : { ...prev, client_type: 'prologis_tx' })
+    } else if (/eastgroup/.test(clientName) && /houston|hou/.test(market)) {
+      setContext(prev => prev.client_type ? prev : { ...prev, client_type: 'eastgroup_houston' })
+    } else if (/dallas|houston|austin|san antonio|fort worth|tx|texas/.test(market)) {
+      setContext(prev => prev.client_type ? prev : { ...prev, client_type: 'non_prologis_tx' })
+    } else if (ext.client_name) {
+      setContext(prev => prev.client_type ? prev : { ...prev, client_type: 'non_prologis_general' })
+    }
+
+    // Smart default: leak history from work order summary
+    const workOrders = (ext.work_order_history_summary || '').toLowerCase()
+    if (/leak|water intrusion/.test(workOrders) && !/no leaks reported|no leak/.test(workOrders)) {
+      setContext(prev => ({ ...prev, has_leak_history: true }))
+    }
   }, [report?.extracted_data])
 
   useEffect(() => {

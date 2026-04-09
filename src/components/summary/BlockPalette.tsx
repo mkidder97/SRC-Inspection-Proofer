@@ -6,11 +6,20 @@ interface BlockPaletteProps {
   usedBlockIds: Set<string>
   reportData: Record<string, any>
   onInsert: (text: string, blockId: string) => void
+  esPhrases?: any[]
 }
 
-export function BlockPalette({ blocks, usedBlockIds, reportData, onInsert }: BlockPaletteProps) {
+export function BlockPalette({ blocks, usedBlockIds, reportData, onInsert, esPhrases = [] }: BlockPaletteProps) {
   const coreBlocks = blocks.filter(b => b.category === 'core')
   const addonBlocks = blocks.filter(b => b.category === 'addon')
+
+  // Group ES phrases by category
+  const phrasesByCategory: Record<string, any[]> = {}
+  for (const p of esPhrases) {
+    const cat = p.service_type || 'general'
+    if (!phrasesByCategory[cat]) phrasesByCategory[cat] = []
+    phrasesByCategory[cat].push(p)
+  }
 
   return (
     <div className="h-full overflow-y-auto">
@@ -18,28 +27,42 @@ export function BlockPalette({ blocks, usedBlockIds, reportData, onInsert }: Blo
         <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Core Blocks</h3>
         <div className="space-y-1.5">
           {coreBlocks.map(block => (
-            <BlockButton
-              key={block.id}
-              block={block}
-              used={usedBlockIds.has(block.id)}
-              reportData={reportData}
-              onInsert={onInsert}
-            />
+            <BlockButton key={block.id} block={block} used={usedBlockIds.has(block.id)} reportData={reportData} onInsert={onInsert} />
           ))}
         </div>
 
         <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mt-5 mb-2">Add-On Blocks</h3>
         <div className="space-y-1.5">
           {addonBlocks.map(block => (
-            <BlockButton
-              key={block.id}
-              block={block}
-              used={usedBlockIds.has(block.id)}
-              reportData={reportData}
-              onInsert={onInsert}
-            />
+            <BlockButton key={block.id} block={block} used={usedBlockIds.has(block.id)} reportData={reportData} onInsert={onInsert} />
           ))}
         </div>
+
+        {/* ES Phrases from DB */}
+        {Object.keys(phrasesByCategory).length > 0 && (
+          <>
+            <h3 className="text-xs font-semibold text-blue-500 uppercase tracking-wider mt-5 mb-2">Saved Phrases</h3>
+            {Object.entries(phrasesByCategory).map(([cat, phrases]) => (
+              <div key={cat} className="mb-3">
+                <p className="text-[10px] font-medium text-gray-400 uppercase mb-1">{cat}</p>
+                <div className="space-y-1">
+                  {phrases.map((p: any) => (
+                    <button
+                      key={p.id}
+                      onClick={() => onInsert((p.content as any)?.text || '', `phrase_${p.id}`)}
+                      className="w-full text-left rounded-lg p-2 transition-all text-xs bg-blue-50/50 border border-blue-100 hover:border-blue-300 hover:shadow-sm cursor-pointer"
+                    >
+                      <span className="font-medium text-blue-800">{p.label}</span>
+                      <p className="text-blue-500/70 text-[10px] leading-relaxed truncate mt-0.5">
+                        {((p.content as any)?.text || '').slice(0, 50)}...
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   )

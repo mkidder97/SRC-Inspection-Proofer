@@ -43,3 +43,11 @@ export const CLIENT_TYPE_LABELS: Record<ClientType, string> = {
   eastgroup_houston: 'EastGroup Houston',
   non_prologis_general: 'Non-Prologis (General)',
 }
+
+export const ES_PHRASE_CATEGORIES = ['condition', 'recommendation', 'timeline', 'drainage', 'flashing', 'skylights', 'general'] as const
+export type ESPhraseCategory = typeof ES_PHRASE_CATEGORIES[number]
+
+export const DEFICIENCY_CATEGORIES = [
+  'Roof Top Equipment', 'Skylights', 'Gutters/Downspouts', 'Perimeter Flashing',
+  'Drainage', 'Field of Roof', 'Expansion Joints', 'Base Flashing', 'General',
+] as const

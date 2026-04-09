@@ -28,6 +28,16 @@ export default function SummaryBuilder() {
     enabled: !!id,
   })
 
+  // Load ES phrases from DB
+  const { data: esPhrases } = useQuery({
+    queryKey: ['ref-library', 'es_phrase'],
+    queryFn: async () => {
+      const { data } = await supabase.from('reference_library').select('*')
+        .eq('entry_type', 'es_phrase').eq('is_active', true).order('service_type').order('label')
+      return data || []
+    },
+  })
+
   const reportData = useMemo(() => {
     const corrected = (report?.corrected_data || report?.extracted_data || {}) as Record<string, any>
     const ctx = (report?.proofer_context || {}) as Record<string, any>
@@ -166,6 +176,7 @@ export default function SummaryBuilder() {
             usedBlockIds={usedBlocks}
             reportData={reportData}
             onInsert={handleInsertBlock}
+            esPhrases={esPhrases || []}
           />
         </div>
 
