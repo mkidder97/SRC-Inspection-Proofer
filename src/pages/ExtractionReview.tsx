@@ -1,11 +1,19 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { supabase } from '@/integrations/supabase/client'
 import { InlineField } from '@/components/InlineField'
 import { CLIENT_TYPES, CLIENT_TYPE_LABELS, SERVICE_TYPE_LABELS } from '@/lib/constants'
+import { REPLACEMENT_PRICING } from '@/lib/pricing-constants'
 import type { ClientType } from '@/lib/constants'
 import { toast } from 'sonner'
+
+const SKYLIGHT_PRICES: Record<string, { label: string; price: number }> = {
+  '4x4': { label: '4×4 Dome', price: 1045 },
+  '4x8': { label: '4×8 Dome', price: 2035 },
+  '4x8_meltout': { label: '4×8 Melt-Out', price: 4500 },
+  '4x8_spring': { label: '4×8 Spring-Loaded', price: 5500 },
+}
 
 export default function ExtractionReview() {
   const { id } = useParams<{ id: string }>()
@@ -25,15 +33,28 @@ export default function ExtractionReview() {
   const [context, setContext] = useState({
     client_type: '' as ClientType | '',
     skylight_count: 0,
-    skylight_dome_type: '' as '4x4' | '4x8' | '',
+    skylight_dome_type: '' as string,
     has_leak_history: false,
     special_notes: '',
   })
   const [confirming, setConfirming] = useState(false)
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
 
+  // Load extracted data and auto-prefill skylight count from inspection findings
   useEffect(() => {
-    if (report?.extracted_data) setData(report.extracted_data as Record<string, any>)
+    if (!report?.extracted_data) return
+    const ext = report.extracted_data as Record<string, any>
+    setData(ext)
+
+    // Auto-prefill skylight count from inspection findings text
+    const findings = ext.inspection_findings || ext.executive_summary || ''
+    const skylightMatch = findings.match(/(\w+)\s*\((\d+)\)\s*(?:curb\s*mounted\s*)?skylight/i)
+    if (skylightMatch) {
+      const count = parseInt(skylightMatch[2])
+      if (count > 0) {
+        setContext(prev => ({ ...prev, skylight_count: count, skylight_dome_type: prev.skylight_dome_type || '4x4' }))
+      }
+    }
   }, [report?.extracted_data])
 
   useEffect(() => {
@@ -48,6 +69,63 @@ export default function ExtractionReview() {
     setData(prev => ({ ...prev, [key]: value }))
   }
 
+  // Compute SRC recommended cap ex price
+  const capExEstimate = useMemo(() => {
+    const sqft = data.square_footage
+    const capType = data.capital_expense_type || ''
+    if (!sqft || !context.client_type) return null
+
+    const isRecover = /recover/i.test(capType)
+    const isTearoff = /tear.?off/i.test(capType)
+    const desc = data.system_description || ''
+    const isBURGravel = /bur.{0,10}gravel|gravel/i.test(desc)
+    const isEPDM = /epdm/i.test(desc)
+    const isInfill = /infill.{0,10}metal/i.test(capType)
+
+    let basePsf: number | null = null
+    if (context.client_type === 'prologis_tx') {
+      const p = REPLACEMENT_PRICING.prologis_texas
+      if (isRecover && isBURGravel) basePsf = p.recover_bur_gravel
+      else if (isRecover) basePsf = p.recover_tpo
+      else if (isTearoff) basePsf = p.tearoff_two_new_tpo
+      else if (isInfill) basePsf = p.tpo_infill_over_metal
+      else if (isEPDM) basePsf = p.epdm_membrane_swap
+    } else if (context.client_type === 'eastgroup_houston') {
+      const p = REPLACEMENT_PRICING.non_prologis_texas
+      if (isRecover) basePsf = p.eastgroup_hou_recover
+      else if (isTearoff) basePsf = p.eastgroup_hou_tearoff
+    } else if (context.client_type === 'non_prologis_tx') {
+      const p = REPLACEMENT_PRICING.non_prologis_texas
+      if (isRecover && isBURGravel) basePsf = p.recover_bur_gravel
+      else if (isRecover) basePsf = p.recover_tpo_bur_smooth_modbit
+      else if (isTearoff) basePsf = p.tearoff_two_new_tpo
+      else if (isInfill) basePsf = p.tpo_infill_over_metal
+      else if (isEPDM) basePsf = p.epdm_membrane_swap
+    } else {
+      const p = REPLACEMENT_PRICING.non_prologis_general
+      if (isRecover && isBURGravel) basePsf = p.recover_bur_gravel
+      else if (isRecover) basePsf = p.recover_tpo_bur_smooth_modbit
+      else if (isTearoff) basePsf = p.tearoff_two_roofs
+      else if (isInfill) basePsf = p.tpo_infill_over_metal
+      else if (isEPDM) basePsf = p.epdm_membrane_swap
+    }
+
+    if (!basePsf) return null
+
+    let economiesAdj = 0
+    if (sqft < 100000) economiesAdj = ((100000 - sqft) / 25000) * 1.0
+    else if (sqft >= 200000) economiesAdj = -1.0
+
+    const adjustedPsf = basePsf + economiesAdj
+    const membraneTotal = Math.round(adjustedPsf * sqft)
+
+    const skylightPrice = SKYLIGHT_PRICES[context.skylight_dome_type]?.price ?? 0
+    const skylightAdder = context.skylight_count > 0 && skylightPrice > 0 ? context.skylight_count * skylightPrice : 0
+    const grandTotal = membraneTotal + skylightAdder
+
+    return { basePsf, economiesAdj, adjustedPsf, membraneTotal, skylightAdder, grandTotal, skylightPrice }
+  }, [data.square_footage, data.capital_expense_type, data.system_description, context.client_type, context.skylight_count, context.skylight_dome_type])
+
   async function handleConfirm() {
     if (!context.client_type) {
       toast.error('Please select a client type before confirming')
@@ -55,7 +133,6 @@ export default function ExtractionReview() {
     }
     setConfirming(true)
     try {
-      // Save corrected data + proofer context
       const { error: updateErr } = await supabase.from('reports').update({
         corrected_data: data,
         proofer_context: context,
@@ -63,7 +140,6 @@ export default function ExtractionReview() {
       }).eq('id', id!)
       if (updateErr) throw updateErr
 
-      // Run proofing
       toast.info('Running proofing passes...')
       const { error: proofErr } = await supabase.functions.invoke('proof-report', { body: { reportId: id } })
       if (proofErr) throw proofErr
@@ -80,11 +156,10 @@ export default function ExtractionReview() {
   if (isLoading) return <div className="p-8 text-gray-500">Loading report data...</div>
   if (!report) return <div className="p-8 text-center text-gray-500">Report not found</div>
 
-  const extracted = report.extracted_data as Record<string, any> | null
   const deficiencies = data.deficiencies || []
 
   return (
-    <div className="h-[calc(100vh-3.5rem)] flex">
+    <div className="h-[calc(100vh-3rem)] flex">
       {/* Left: PDF */}
       <div className="w-[58%] bg-gray-100 border-r">
         {pdfUrl ? (
@@ -96,7 +171,6 @@ export default function ExtractionReview() {
 
       {/* Right: Data Review */}
       <div className="w-[42%] overflow-y-auto">
-        {/* Header */}
         <div className="sticky top-0 bg-white border-b px-5 py-3 z-10">
           <div className="flex items-center justify-between">
             <div>
@@ -110,7 +184,7 @@ export default function ExtractionReview() {
         </div>
 
         <div className="px-5 py-4 space-y-6">
-          {/* Section A: Extracted Data */}
+          {/* Property */}
           <section>
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Property Information</h2>
             <div className="space-y-0.5">
@@ -124,6 +198,7 @@ export default function ExtractionReview() {
 
           <hr className="border-gray-100" />
 
+          {/* Roof System */}
           <section>
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Roof System</h2>
             <div className="space-y-0.5">
@@ -149,47 +224,77 @@ export default function ExtractionReview() {
 
           <hr className="border-gray-100" />
 
+          {/* Capital Expense — with SRC recommendation */}
           <section>
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Capital Expense</h2>
             <div className="space-y-0.5">
               <InlineField label="Expense Type" value={data.capital_expense_type} onChange={v => updateField('capital_expense_type', v)} />
-              <InlineField label="Total ($)" value={data.capital_expense_total} onChange={v => updateField('capital_expense_total', v)} type="number" />
-              <InlineField label="Per Sqft ($)" value={data.capital_expense_per_sqft} onChange={v => updateField('capital_expense_per_sqft', v)} type="number" />
+              <InlineField label="Report Total ($)" value={data.capital_expense_total} onChange={v => updateField('capital_expense_total', v)} type="number" />
+              <InlineField label="Report Per Sqft ($)" value={data.capital_expense_per_sqft} onChange={v => updateField('capital_expense_per_sqft', v)} type="number" />
               <InlineField label="Replacement Year" value={data.replacement_year} onChange={v => updateField('replacement_year', v)} type="number" />
             </div>
+
+            {/* SRC Recommended Estimate */}
+            {capExEstimate ? (
+              <div className="mt-3 rounded-lg bg-green-50 border border-green-200 p-3">
+                <h3 className="text-xs font-semibold text-green-800 mb-2">SRC Recommended Estimate</h3>
+                <div className="space-y-1 text-xs">
+                  <div className="flex justify-between text-green-700">
+                    <span>Membrane ({(data.square_footage || 0).toLocaleString()} sqft × ${capExEstimate.adjustedPsf.toFixed(2)})</span>
+                    <span className="font-mono font-medium">${capExEstimate.membraneTotal.toLocaleString()}</span>
+                  </div>
+                  {capExEstimate.skylightAdder > 0 ? (
+                    <div className="flex justify-between text-green-700">
+                      <span>Skylights ({context.skylight_count} × ${capExEstimate.skylightPrice.toLocaleString()})</span>
+                      <span className="font-mono font-medium">${capExEstimate.skylightAdder.toLocaleString()}</span>
+                    </div>
+                  ) : context.skylight_count === 0 ? (
+                    <div className="text-amber-600 italic">Does not include skylights — enter count below if applicable</div>
+                  ) : null}
+                  <hr className="border-green-200" />
+                  <div className="flex justify-between text-green-900 font-semibold">
+                    <span>SRC Recommended Total</span>
+                    <span className="font-mono">${capExEstimate.grandTotal.toLocaleString()}</span>
+                  </div>
+                  {data.capital_expense_total && (
+                    <div className="flex justify-between text-gray-500 pt-1">
+                      <span>Report states</span>
+                      <span className="font-mono">${data.capital_expense_total.toLocaleString()}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : context.client_type ? (
+              <div className="mt-3 rounded-lg bg-gray-50 border p-3 text-xs text-gray-500 italic">
+                Select expense type and ensure square footage is filled to see SRC recommendation
+              </div>
+            ) : null}
           </section>
 
           <hr className="border-gray-100" />
 
-          {/* Deficiencies table */}
+          {/* Deficiencies — full descriptions, no truncation */}
           <section>
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
               Deficiencies ({deficiencies.length})
             </h2>
             {deficiencies.length > 0 ? (
-              <div className="rounded-lg border overflow-hidden">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="bg-gray-50 border-b">
-                      <th className="text-left px-3 py-2 font-medium text-gray-500">#</th>
-                      <th className="text-left px-3 py-2 font-medium text-gray-500">Category</th>
-                      <th className="text-left px-3 py-2 font-medium text-gray-500">Description</th>
-                      <th className="text-right px-3 py-2 font-medium text-gray-500">Qty</th>
-                      <th className="text-right px-3 py-2 font-medium text-gray-500">Cost</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deficiencies.map((d: any, i: number) => (
-                      <tr key={i} className="border-b last:border-0 hover:bg-gray-50/50">
-                        <td className="px-3 py-2 text-gray-500">{d.number}</td>
-                        <td className="px-3 py-2 font-medium">{d.category}</td>
-                        <td className="px-3 py-2 text-gray-600 max-w-[200px] truncate">{d.description}</td>
-                        <td className="px-3 py-2 text-right">{d.quantity ?? '—'}</td>
-                        <td className="px-3 py-2 text-right font-mono">{d.cost ? `$${d.cost.toLocaleString()}` : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="space-y-2">
+                {deficiencies.map((d: any, i: number) => (
+                  <div key={i} className="rounded-lg border p-3 bg-white hover:shadow-sm transition-shadow">
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-gray-400">#{d.number}</span>
+                        <span className="text-xs font-semibold text-gray-800">{d.category}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs flex-shrink-0">
+                        <span className="text-gray-500">Qty: <strong>{d.quantity ?? '—'}</strong></span>
+                        <span className="font-mono font-semibold text-gray-800">{d.cost ? `$${d.cost.toLocaleString()}` : '—'}</span>
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-600 leading-relaxed">{d.description}</p>
+                  </div>
+                ))}
               </div>
             ) : (
               <p className="text-sm text-gray-400 italic">No deficiencies extracted</p>
@@ -198,7 +303,7 @@ export default function ExtractionReview() {
 
           <hr className="border-gray-100" />
 
-          {/* Section B: Proofer Context */}
+          {/* Proofer Context */}
           <section>
             <h2 className="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-1">Proofer Context</h2>
             <p className="text-xs text-gray-400 mb-3">Information the PDF doesn't contain — you provide it</p>
@@ -234,12 +339,13 @@ export default function ExtractionReview() {
                     <label className="block text-xs font-medium text-gray-700 mb-1">Dome Type</label>
                     <select
                       value={context.skylight_dome_type}
-                      onChange={e => setContext(prev => ({ ...prev, skylight_dome_type: e.target.value as '4x4' | '4x8' | '' }))}
+                      onChange={e => setContext(prev => ({ ...prev, skylight_dome_type: e.target.value }))}
                       className="w-full px-3 py-2 rounded-md border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
                     >
                       <option value="">Select...</option>
-                      <option value="4x4">4×4 ($1,045/ea)</option>
-                      <option value="4x8">4×8 ($2,035/ea)</option>
+                      {Object.entries(SKYLIGHT_PRICES).map(([key, { label, price }]) => (
+                        <option key={key} value={key}>{label} (${price.toLocaleString()}/ea)</option>
+                      ))}
                     </select>
                   </div>
                 )}
@@ -270,7 +376,7 @@ export default function ExtractionReview() {
             </div>
           </section>
 
-          {/* Action buttons */}
+          {/* Confirm */}
           <div className="flex gap-3 pb-6">
             <button
               onClick={handleConfirm}
